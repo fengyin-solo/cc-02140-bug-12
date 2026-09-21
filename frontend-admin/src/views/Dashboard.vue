@@ -86,7 +86,9 @@
                     </a-avatar>
                     <div class="borrow-detail">
                       <span class="reader-name">{{ record.readerName }}</span>
-                      <span class="book-title">{{ record.bookTitle }}</span>
+                      <!-- 按图书 ID 核对当前书名；图书已删除时明确标记，避免继续展示旧数据 -->
+                      <span v-if="getRecordBook(record)" class="book-title">{{ getRecordBook(record).title }}</span>
+                      <span v-else class="book-title deleted-book">该图书已删除</span>
                     </div>
                   </div>
                   <div class="borrow-meta">
@@ -172,6 +174,7 @@
                   {{ book.available }}/{{ book.total }}
                 </span>
               </div>
+              <div class="book-hot">🔥 被借阅 {{ book.borrowCount }} 次</div>
             </div>
           </div>
         </a-col>
@@ -208,17 +211,47 @@ const recentBorrows = computed(() => {
     .slice(0, 5)
 })
 
+// 借阅记录统一按图书 ID 核对当前图书对象；图书已删除时返回 null
+function getRecordBook(record) {
+  if (!record || record.bookId === null || record.bookId === undefined) return null
+  return bookStore.getBookById(record.bookId) || null
+}
+
+// 分类统计按图书表实时统计（删除/新增后即时回显，不再使用分类上冗余的静态数字）
 const topCategories = computed(() => {
-  return categoryStore.categories.slice(0, 6)
+  return categoryStore.categories
+    .map(cat => ({
+      ...cat,
+      bookCount: bookStore.bookCountByCategory[cat.id] || 0
+    }))
+    .sort((a, b) => b.bookCount - a.bookCount)
+    .slice(0, 6)
 })
 
 const maxBookCount = computed(() => {
-  const counts = categoryStore.categories.map(c => c.bookCount)
+  const counts = topCategories.value.map(c => c.bookCount)
   return Math.max(...counts, 1)
 })
 
+// 热门图书：按借阅记录中的图书 ID 聚合计数，
+// 只统计当前仍在库的图书（已删除的自动排除），每本图书只出现一次
 const hotBooks = computed(() => {
-  return bookStore.books.slice(0, 4)
+  const countMap = {}
+  for (const record of borrowStore.records) {
+    if (record.bookId === null || record.bookId === undefined) continue
+    countMap[record.bookId] = (countMap[record.bookId] || 0) + 1
+  }
+
+  const ranked = bookStore.books
+    .map(book => ({ ...book, borrowCount: countMap[book.id] || 0 }))
+    .sort((a, b) => {
+      if (b.borrowCount !== a.borrowCount) return b.borrowCount - a.borrowCount
+      return a.id - b.id
+    })
+
+  // 有借阅记录的优先展示；不足 4 本时用其余在库图书补齐
+  const picked = ranked.slice(0, 4)
+  return picked
 })
 
 const avatarColors = ['#1890ff', '#52c41a', '#faad14', '#722ed1', '#eb2f96', '#13c2c2']
@@ -516,6 +549,10 @@ function getProgressColor(id) {
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+
+          &.deleted-book {
+            color: #ff4d4f;
+          }
         }
       }
     }
@@ -688,6 +725,12 @@ function getProgressColor(id) {
           animation: float 2s ease-in-out infinite;
         }
       }
+    }
+
+    .book-hot {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #fa541c;
     }
   }
 }

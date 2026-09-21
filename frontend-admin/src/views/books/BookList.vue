@@ -116,11 +116,14 @@
           </template>
           <template v-else-if="column.key === 'action'">
             <a-space>
+              <a-button type="link" size="small" class="table-action-btn detail-btn" @click="showDetailModal(record.id)">
+                <EyeOutlined /> 详情
+              </a-button>
               <a-button type="link" size="small" class="table-action-btn edit-btn" @click="showEditModal(record)">
                 <EditOutlined /> 编辑
               </a-button>
               <a-popconfirm
-                title="确定要删除这本图书吗？"
+                :title="getDeleteConfirmText(record)"
                 ok-text="确定"
                 cancel-text="取消"
                 @confirm="handleDelete(record.id)"
@@ -189,16 +192,51 @@
             <a-form-item label="库存" name="total" :label-col="{ span: 10 }" :wrapper-col="{ span: 12 }">
               <a-input-number
                 v-model:value="formState.total"
-                :min="0"
+                :min="isEdit ? editingBorrowedCount : 0"
                 style="width: 100%"
               />
             </a-form-item>
           </a-col>
         </a-row>
+        <div v-if="isEdit && editingBorrowedCount > 0" class="stock-tip">
+          当前已借出 {{ editingBorrowedCount }} 本，总库存不可小于该数量；减少库存会自动扣减可借数量。
+        </div>
         <a-form-item label="存放位置" name="location">
           <a-input v-model:value="formState.location" placeholder="如：A区-01-03" />
         </a-form-item>
       </a-form>
+    </a-modal>
+
+    <!-- 图书详情弹窗：始终按图书 ID 从 store 核对，图书被删除时给出明确提示 -->
+    <a-modal
+      v-model:open="detailVisible"
+      title="图书详情"
+      :footer="null"
+      width="560px"
+    >
+      <div v-if="currentBook" class="book-detail-modal">
+        <div class="detail-cover">
+          <img :src="currentBook.cover" :alt="currentBook.title" />
+        </div>
+        <a-descriptions :column="1" bordered size="small" class="detail-desc">
+          <a-descriptions-item label="书名">{{ currentBook.title }}</a-descriptions-item>
+          <a-descriptions-item label="ISBN">{{ currentBook.isbn }}</a-descriptions-item>
+          <a-descriptions-item label="作者">{{ currentBook.author }}</a-descriptions-item>
+          <a-descriptions-item label="出版社">{{ currentBook.publisher }}</a-descriptions-item>
+          <a-descriptions-item label="分类">
+            <a-tag color="blue">{{ currentBook.categoryName }}</a-tag>
+          </a-descriptions-item>
+          <a-descriptions-item label="价格">￥{{ currentBook.price }}</a-descriptions-item>
+          <a-descriptions-item label="库存">
+            可借 {{ currentBook.available }} / 共 {{ currentBook.total }}（已借 {{ currentBook.total - currentBook.available }}）
+          </a-descriptions-item>
+          <a-descriptions-item label="存放位置">{{ currentBook.location }}</a-descriptions-item>
+          <a-descriptions-item v-if="currentBook.description" label="简介">
+            {{ currentBook.description }}
+          </a-descriptions-item>
+        </a-descriptions>
+      </div>
+      <a-empty v-else description="该图书已被删除或不存在，无法查看详情" class="detail-empty" />
     </a-modal>
   </div>
 </template>
@@ -209,20 +247,25 @@ import { message } from 'ant-design-vue'
 import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined, EyeOutlined } from '@ant-design/icons-vue'
 import { useBookStore } from '@/stores/book'
 import { useCategoryStore } from '@/stores/category'
+import { useBorrowStore } from '@/stores/borrow'
 
 const bookStore = useBookStore()
 const categoryStore = useCategoryStore()
+const borrowStore = useBorrowStore()
 
 const loading = ref(false)
 const searchKeyword = ref('')
 const selectedCategory = ref(null)
 const modalVisible = ref(false)
+const detailVisible = ref(false)
 const submitLoading = ref(false)
 const isEdit = ref(false)
 const editingId = ref(null)
 const formRef = ref(null)
 const isSearching = ref(false)
 const tableAnimating = ref(false)
+// 详情按 ID 核对，始终保存当前查看的图书对象（可能为 null）
+const currentBook = ref(null)
 let searchTimeout = null
 
 const columns = [
@@ -233,7 +276,7 @@ const columns = [
   { title: '价格', dataIndex: 'price', key: 'price', width: 80 },
   { title: '库存', key: 'stock', width: 80 },
   { title: '位置', dataIndex: 'location', key: 'location', width: 100 },
-  { title: '操作', key: 'action', width: 150, fixed: 'right' }
+  { title: '操作', key: 'action', width: 210, fixed: 'right' }
 ]
 
 const formState = reactive({
@@ -352,22 +395,56 @@ function showAddModal() {
 }
 
 function showEditModal(record) {
+  // 编辑前按图书 ID 重新核对，避免使用列表行快照误改到同名的另一本书
+  const book = bookStore.getBookById(record.id)
+  if (!book) {
+    message.error('该图书不存在或已被删除，无法编辑')
+    return
+  }
+
   isEdit.value = true
-  editingId.value = record.id
+  editingId.value = book.id
   Object.assign(formState, {
-    isbn: record.isbn,
-    title: record.title,
-    author: record.author,
-    publisher: record.publisher,
-    categoryId: record.categoryId,
-    price: record.price,
-    total: record.total,
-    location: record.location
+    isbn: book.isbn,
+    title: book.title,
+    author: book.author,
+    publisher: book.publisher,
+    categoryId: book.categoryId,
+    price: book.price,
+    total: book.total,
+    location: book.location
   })
   modalVisible.value = true
   nextTick(() => {
     formRef.value?.clearValidate()
   })
+}
+
+// 编辑前展示当前已借出数量，并约束总库存下限（总库存不能小于已借出数量）
+const editingBorrowedCount = computed(() => {
+  if (!isEdit.value || editingId.value === null) return 0
+  const book = bookStore.getBookById(editingId.value)
+  if (!book) return 0
+  return Math.max(0, Number(book.total) - Number(book.available))
+})
+
+function showDetailModal(id) {
+  // 详情始终按同一图书标识（ID）核对，删除后打开不会报错，只提示不存在
+  currentBook.value = bookStore.getBookById(id) || null
+  detailVisible.value = true
+}
+
+// 删除确认文案：未归还的图书直接提示原因
+function getDeleteConfirmText(record) {
+  const book = bookStore.getBookById(record.id)
+  if (!book) {
+    return '该图书不存在或已被删除'
+  }
+  const activeCount = borrowStore.getActiveBorrowCountByBook(book.id)
+  if (activeCount > 0) {
+    return `《${book.title}》尚有 ${activeCount} 条未归还借阅记录，无法删除`
+  }
+  return `确定要删除《${book.title}》吗？`
 }
 
 // 导入本地封面图片
@@ -397,6 +474,23 @@ async function handleSubmit() {
     await formRef.value.validate()
     submitLoading.value = true
 
+    // 编辑时再次按 ID 核对目标图书，防止同名图书被误改
+    const targetBook = isEdit.value ? bookStore.getBookById(editingId.value) : true
+    if (isEdit.value && !targetBook) {
+      message.error('该图书不存在或已被删除，编辑失败')
+      modalVisible.value = false
+      return
+    }
+
+    // 总库存不能小于当前已借出数量
+    if (isEdit.value) {
+      const borrowedCount = Math.max(0, Number(targetBook.total) - Number(targetBook.available))
+      if (Number(formState.total) < borrowedCount) {
+        message.error(`总库存不能少于已借出数量（${borrowedCount} 本）`)
+        return
+      }
+    }
+
     const category = categoryStore.getCategoryById(formState.categoryId)
 
     // 使用真实书籍封面图片
@@ -405,26 +499,27 @@ async function handleSubmit() {
     const bookData = {
       ...formState,
       categoryName: category?.name || '',
-      available: isEdit.value ? undefined : formState.total,
-      cover: isEdit.value ? (bookStore.getBookById(editingId.value)?.cover || randomCover) : randomCover
+      cover: isEdit.value ? (targetBook?.cover || randomCover) : randomCover
     }
 
-    // 编辑时不覆盖 available
-    if (isEdit.value) {
-      delete bookData.available
-    }
+    // 编辑时不直接提交 available：总库存变化由 store 按"已借出数量不变"联动计算
+    delete bookData.available
 
     await new Promise(resolve => setTimeout(resolve, 500))
 
     if (isEdit.value) {
-      bookStore.updateBook(editingId.value, bookData)
-      message.success('图书更新成功')
+      const updated = bookStore.updateBook(editingId.value, bookData)
+      if (updated) {
+        message.success('图书更新成功')
+        modalVisible.value = false
+      } else {
+        message.error('图书更新失败：未找到对应图书，原记录未改动')
+      }
     } else {
       bookStore.addBook(bookData)
       message.success('图书添加成功')
+      modalVisible.value = false
     }
-
-    modalVisible.value = false
   } catch (error) {
     console.error('表单验证失败:', error)
   } finally {
@@ -433,8 +528,13 @@ async function handleSubmit() {
 }
 
 function handleDelete(id) {
-  bookStore.deleteBook(id)
-  message.success('图书删除成功')
+  // store 内部做关联检查：已借出的图书拒绝删除，删除失败保留原记录并说明原因
+  const result = bookStore.deleteBook(id)
+  if (result.success) {
+    message.success(result.message)
+  } else {
+    message.warning(result.message)
+  }
 }
 </script>
 
@@ -804,5 +904,44 @@ function handleDelete(id) {
 .low-stock {
   color: #ff4d4f;
   font-weight: 500;
+}
+
+.stock-tip {
+  margin: -8px 0 12px 88px;
+  font-size: 12px;
+  color: #faad14;
+}
+
+.table-action-btn {
+  &.detail-btn:hover {
+    color: #722ed1;
+    background: #f9f0ff;
+  }
+}
+
+.book-detail-modal {
+  display: flex;
+  gap: 16px;
+
+  .detail-cover {
+    flex-shrink:  0;
+
+    img {
+      width: 120px;
+      height: 160px;
+      object-fit: cover;
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    }
+  }
+
+  .detail-desc {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.detail-empty {
+  padding: 32px 0;
 }
 </style>

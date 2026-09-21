@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { categories as initialCategories } from '@/data/mockData'
+import { useBookStore } from '@/stores/book'
 
 const STORAGE_KEY = 'library_categories'
 
@@ -41,7 +42,12 @@ export const useCategoryStore = defineStore('category', () => {
   function updateCategory(id, data) {
     const index = categories.value.findIndex(cat => cat.id === id)
     if (index !== -1) {
+      const prevName = categories.value[index].name
       categories.value[index] = { ...categories.value[index], ...data }
+      // 分类重命名后同步图书上冗余的分类名称，保证列表与统计回显一致
+      if (data.name && data.name !== prevName) {
+        useBookStore().updateBooksCategoryName(id, data.name)
+      }
       return true
     }
     return false

@@ -202,8 +202,16 @@
           </template>
           <template v-else-if="column.key === 'book'">
             <div class="book-cell">
-              <div class="text-primary">{{ record.bookTitle }}</div>
-              <div class="text-secondary">{{ record.isbn }}</div>
+              <template v-if="getBorrowedBook(record)">
+                <div class="text-primary">{{ getBorrowedBook(record).title }}</div>
+                <div class="text-secondary">{{ getBorrowedBook(record).isbn }}</div>
+              </template>
+              <template v-else>
+                <div class="text-primary deleted-book">
+                  <DeleteOutlined /> {{ record.bookTitle || '已删除图书' }}
+                </div>
+                <div class="text-secondary">图书已删除（记录保留）</div>
+              </template>
             </div>
           </template>
           <template v-else-if="column.key === 'status'">
@@ -312,7 +320,8 @@ import {
   WarningOutlined,
   AlertOutlined,
   SearchOutlined,
-  CalendarOutlined
+  CalendarOutlined,
+  DeleteOutlined
 } from '@ant-design/icons-vue'
 import { useBorrowStore } from '@/stores/borrow'
 import { useReaderStore } from '@/stores/reader'
@@ -424,6 +433,12 @@ const availableBooks = computed(() => {
   return bookStore.books.filter(b => b.available > 0)
 })
 
+// 借阅记录按图书 ID 核对当前图书对象；图书已删除时返回 null，避免访问属性报错
+function getBorrowedBook(record) {
+  if (!record || record.bookId === null || record.bookId === undefined) return null
+  return bookStore.getBookById(record.bookId) || null
+}
+
 function getStatusColor(status) {
   const colors = {
     borrowed: 'processing',
@@ -518,13 +533,21 @@ async function handleBorrowSubmit() {
     const reader = readerStore.getReaderById(borrowForm.readerId)
     const book = bookStore.getBookById(borrowForm.bookId)
 
+    // 借阅入口与列表/详情使用同一图书标识（ID）核对结果
     if (!reader || !book) {
-      message.error('读者或图书信息不存在')
+      message.error('读者或图书信息不存在，借阅失败')
+      return
+    }
+
+    // 库存必须充足才允许借出
+    if (book.available <= 0) {
+      message.error(`《${book.title}》库存不足，暂时无法借阅`)
       return
     }
 
     await new Promise(resolve => setTimeout(resolve, 500))
 
+    // 以 ID 为准记录借阅，同时保存书名/ISBN 快照；快照只用于搜索，不用于关联判断
     borrowStore.addRecord({
       readerId: reader.id,
       readerName: reader.name,
@@ -547,19 +570,35 @@ async function handleBorrowSubmit() {
 }
 
 function handleReturn(record) {
-  borrowStore.returnBook(record.id)
+  // 归还前按记录 ID 与图书 ID 重新核对
+  const latestRecord = borrowStore.getRecordById(record.id)
+  if (!latestRecord) {
+    message.error('借阅记录不存在，归还失败')
+    return
+  }
 
-  const book = bookStore.getBookById(record.bookId)
-  const reader = readerStore.getReaderById(record.readerId)
+  const book = bookStore.getBookById(latestRecord.bookId)
+  const reader = readerStore.getReaderById(latestRecord.readerId)
+
+  const returned = borrowStore.returnBook(latestRecord.id)
+  if (!returned) {
+    message.error('归还失败，借阅记录状态未改动')
+    return
+  }
 
   if (book) {
     bookStore.updateBook(book.id, { available: book.available + 1 })
+  } else {
+    // 关联图书已被删除：记录正常归还，但无法回补库存
+    message.warning('该借阅记录关联的图书已删除，记录已标记为归还')
   }
   if (reader) {
     readerStore.updateReader(reader.id, { borrowCount: Math.max(0, reader.borrowCount - 1) })
   }
 
-  message.success('归还成功')
+  if (book) {
+    message.success('归还成功')
+  }
 }
 
 function handleRenew(record) {
@@ -989,5 +1028,9 @@ function handleRenew(record) {
 
 .status-tag {
   // 保持默认样式
+}
+
+.deleted-book {
+  color: #ff4d4f;
 }
 </style>

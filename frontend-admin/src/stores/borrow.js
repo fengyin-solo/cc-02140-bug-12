@@ -3,6 +3,26 @@ import { ref, computed, watch } from 'vue'
 import { borrowRecords as initialRecords } from '@/data/mockData'
 
 const STORAGE_KEY = 'library_borrow_records'
+// 借阅记录 ID 序列：单独持久化，删除记录后 ID 不复用
+const ID_SEQ_KEY = 'library_borrow_records_id_seq'
+
+function loadInitialIdSeq() {
+  let maxId = initialRecords.reduce((max, record) => Math.max(max, Number(record.id) || 0), 0)
+  const storedSeq = Number(localStorage.getItem(ID_SEQ_KEY))
+  if (!Number.isNaN(storedSeq) && storedSeq > 0) {
+    maxId = Math.max(maxId, storedSeq)
+  }
+  const stored = localStorage.getItem(STORAGE_KEY)
+  if (stored) {
+    try {
+      const parsedRecords = JSON.parse(stored)
+      maxId = parsedRecords.reduce((max, record) => Math.max(max, Number(record.id) || 0), maxId)
+    } catch (e) {
+      console.error('Failed to parse stored records:', e)
+    }
+  }
+  return maxId
+}
 
 export const useBorrowStore = defineStore('borrow', () => {
   const loadRecords = () => {
@@ -19,10 +39,15 @@ export const useBorrowStore = defineStore('borrow', () => {
 
   const records = ref(loadRecords())
   const loading = ref(false)
+  const idSeq = ref(loadInitialIdSeq())
 
   watch(records, (newRecords) => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(newRecords))
   }, { deep: true })
+
+  watch(idSeq, (newSeq) => {
+    localStorage.setItem(ID_SEQ_KEY, String(newSeq))
+  })
 
   const totalBorrowed = computed(() =>
     records.value.filter(r => r.status === 'borrowed').length
@@ -45,10 +70,17 @@ export const useBorrowStore = defineStore('borrow', () => {
     return records.value.filter(record => record.readerId === readerId)
   }
 
+  // 某本图书未归还（借阅中/已逾期）的记录数，供删除图书等场景做关联检查
+  function getActiveBorrowCountByBook(bookId) {
+    return records.value.filter(record =>
+      record.bookId === bookId &&
+      (record.status === 'borrowed' || record.status === 'overdue')
+    ).length
+  }
+
   function addRecord(record) {
-    const newId = records.value.length > 0
-      ? Math.max(...records.value.map(r => r.id)) + 1
-      : 1
+    const newId = idSeq.value + 1
+    idSeq.value = newId
     const today = new Date().toISOString().split('T')[0]
     const dueDate = new Date()
     dueDate.setDate(dueDate.getDate() + 30)
@@ -93,7 +125,7 @@ export const useBorrowStore = defineStore('borrow', () => {
     return records.value.filter(record =>
       record.readerName.toLowerCase().includes(lowerKeyword) ||
       record.bookTitle.toLowerCase().includes(lowerKeyword) ||
-      record.cardNo.toLowerCase().includes(lowerKeyword)
+      record.cardNo.toLowerCase().includes(keyword)
     )
   }
 
@@ -105,6 +137,7 @@ export const useBorrowStore = defineStore('borrow', () => {
     todayBorrows,
     getRecordById,
     getRecordsByReader,
+    getActiveBorrowCountByBook,
     addRecord,
     returnBook,
     renewBook,
