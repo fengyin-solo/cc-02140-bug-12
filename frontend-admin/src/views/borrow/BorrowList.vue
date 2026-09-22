@@ -202,8 +202,19 @@
           </template>
           <template v-else-if="column.key === 'book'">
             <div class="book-cell">
-              <div class="text-primary">{{ record.bookTitle }}</div>
-              <div class="text-secondary">{{ record.isbn }}</div>
+              <template v-if="getLinkedBook(record.bookId)">
+                <div class="text-primary">{{ getLinkedBook(record.bookId).title }}</div>
+                <div class="text-secondary">{{ getLinkedBook(record.bookId).isbn }}</div>
+              </template>
+              <template v-else>
+                <a-tooltip :title="`图书ID：${record.bookId ?? '-'}，该图书已被删除`">
+                  <div class="text-primary book-missing">
+                    {{ record.bookTitle || '已删除图书' }}
+                    <a-tag color="default" class="missing-tag">已删除</a-tag>
+                  </div>
+                </a-tooltip>
+                <div class="text-secondary">{{ record.isbn }}</div>
+              </template>
             </div>
           </template>
           <template v-else-if="column.key === 'status'">
@@ -286,7 +297,7 @@
               :value="book.id"
               :label="book.title"
             >
-              {{ book.title }} (库存: {{ book.available }})
+              {{ book.title }} (ISBN: {{ book.isbn }}，库存: {{ book.available }})
             </a-select-option>
           </a-select>
         </a-form-item>
@@ -424,6 +435,11 @@ const availableBooks = computed(() => {
   return bookStore.books.filter(b => b.available > 0)
 })
 
+// 借阅记录里的图书一律按 bookId 实时核对；找不到说明图书已删除
+function getLinkedBook(bookId) {
+  return bookStore.getBookById(bookId)
+}
+
 function getStatusColor(status) {
   const colors = {
     borrowed: 'processing',
@@ -515,15 +531,32 @@ async function handleBorrowSubmit() {
     await borrowFormRef.value.validate()
     submitLoading.value = true
 
+    // 读者、图书都按 id 核对，杜绝同名图书/读者错位
     const reader = readerStore.getReaderById(borrowForm.readerId)
     const book = bookStore.getBookById(borrowForm.bookId)
 
-    if (!reader || !book) {
-      message.error('读者或图书信息不存在')
+    if (!reader) {
+      message.error('读者信息不存在或已被删除')
+      return
+    }
+    if (!book) {
+      message.error('图书不存在或已被删除')
+      return
+    }
+    if (book.available <= 0) {
+      message.error(`《${book.title}》当前无可用库存，无法借出`)
       return
     }
 
     await new Promise(resolve => setTimeout(resolve, 500))
+
+    // 先按图书 id 原子扣减库存，成功后再生成借阅记录，
+    // 保证不会出现“记录已建但库存没扣”的错位
+    const stockResult = bookStore.adjustBookStock(book.id, -1)
+    if (!stockResult.success) {
+      message.error(stockResult.reason)
+      return
+    }
 
     borrowStore.addRecord({
       readerId: reader.id,
@@ -533,8 +566,6 @@ async function handleBorrowSubmit() {
       bookTitle: book.title,
       isbn: book.isbn
     })
-
-    bookStore.updateBook(book.id, { available: book.available - 1 })
     readerStore.updateReader(reader.id, { borrowCount: reader.borrowCount + 1 })
 
     message.success('借阅成功')
@@ -547,13 +578,23 @@ async function handleBorrowSubmit() {
 }
 
 function handleReturn(record) {
-  borrowStore.returnBook(record.id)
+  const borrowSuccess = borrowStore.returnBook(record.id)
+  if (!borrowSuccess) {
+    message.error('借阅记录不存在，归还失败')
+    return
+  }
 
+  // 图书按 record.bookId 核对：图书可能已被删除，此时只更新记录状态
   const book = bookStore.getBookById(record.bookId)
   const reader = readerStore.getReaderById(record.readerId)
 
   if (book) {
-    bookStore.updateBook(book.id, { available: book.available + 1 })
+    const stockResult = bookStore.adjustBookStock(book.id, 1)
+    if (!stockResult.success) {
+      message.warning(`归还状态已更新，但库存回补失败：${stockResult.reason}`)
+    }
+  } else {
+    message.warning('关联图书已删除，归还状态已更新，库存未做调整')
   }
   if (reader) {
     readerStore.updateReader(reader.id, { borrowCount: Math.max(0, reader.borrowCount - 1) })
@@ -980,6 +1021,16 @@ function handleRenew(record) {
 .text-primary {
   font-weight: 500;
   color: #1a1a1a;
+}
+
+.book-missing {
+  color: #999;
+  text-decoration: line-through;
+
+  .missing-tag {
+    text-decoration: none;
+    margin-left: 4px;
+  }
 }
 
 .text-secondary {

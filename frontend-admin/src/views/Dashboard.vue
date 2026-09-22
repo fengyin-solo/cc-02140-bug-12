@@ -86,7 +86,10 @@
                     </a-avatar>
                     <div class="borrow-detail">
                       <span class="reader-name">{{ record.readerName }}</span>
-                      <span class="book-title">{{ record.bookTitle }}</span>
+                      <span :class="['book-title', { 'book-missing': !getLinkedBook(record.bookId) }]">
+                        {{ getLinkedBook(record.bookId)?.title || record.bookTitle || '已删除图书' }}
+                        <a-tag v-if="!getLinkedBook(record.bookId)" color="default" class="missing-tag">已删除</a-tag>
+                      </span>
                     </div>
                   </div>
                   <div class="borrow-meta">
@@ -123,14 +126,14 @@
                   <span class="category-name">{{ cat.name }}</span>
                 </div>
                 <div class="category-right">
-                  <span class="category-count animate-number">{{ cat.bookCount }}</span>
+                  <span class="category-count animate-number">{{ categoryCount(cat.id) }}</span>
                   <span class="category-unit">本</span>
                 </div>
                 <div class="category-progress">
                   <div
                     class="category-progress-bar"
                     :style="{
-                      width: `${(cat.bookCount / maxBookCount) * 100}%`,
+                      width: `${(categoryCount(cat.id) / maxBookCount) * 100}%`,
                       backgroundColor: getProgressColor(cat.id)
                     }"
                   ></div>
@@ -208,17 +211,39 @@ const recentBorrows = computed(() => {
     .slice(0, 5)
 })
 
+// 借阅记录中的图书按 bookId 实时核对；图书已删除时返回 undefined，由模板标记
+function getLinkedBook(bookId) {
+  return bookStore.getBookById(bookId)
+}
+
 const topCategories = computed(() => {
   return categoryStore.categories.slice(0, 6)
 })
 
+// 分类统计回显真实在库数量（按 categoryId 核对当前图书），不再使用静态 bookCount
+function categoryCount(categoryId) {
+  return bookStore.countBooksByCategory(categoryId)
+}
+
 const maxBookCount = computed(() => {
-  const counts = categoryStore.categories.map(c => c.bookCount)
+  const counts = categoryStore.categories.map(c => bookStore.countBooksByCategory(c.id))
   return Math.max(...counts, 1)
 })
 
+// 热门图书：按真实借阅记录数（同一图书 id 聚合）排序，
+// 只输出仍在库的图书，删除后自动消失，不会残留旧数据
 const hotBooks = computed(() => {
-  return bookStore.books.slice(0, 4)
+  const borrowCounts = new Map()
+  borrowStore.records.forEach(record => {
+    if (!bookStore.getBookById(record.bookId)) return
+    borrowCounts.set(record.bookId, (borrowCounts.get(record.bookId) || 0) + 1)
+  })
+
+  return [...bookStore.books]
+    .map(book => ({ book, count: borrowCounts.get(book.id) || 0 }))
+    .sort((a, b) => b.count - a.count || a.book.id - b.book.id)
+    .slice(0, 4)
+    .map(item => item.book)
 })
 
 const avatarColors = ['#1890ff', '#52c41a', '#faad14', '#722ed1', '#eb2f96', '#13c2c2']
@@ -516,6 +541,15 @@ function getProgressColor(id) {
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+
+          &.book-missing {
+            text-decoration: line-through;
+
+            .missing-tag {
+              text-decoration: none;
+              margin-left: 2px;
+            }
+          }
         }
       }
     }

@@ -63,7 +63,7 @@
           <div class="category-footer">
             <div class="book-count">
               <BookOutlined />
-              <span>{{ category.bookCount }} 本图书</span>
+              <span>{{ getBookCount(category.id) }} 本图书</span>
             </div>
           </div>
         </div>
@@ -127,8 +127,15 @@ import {
   SearchOutlined
 } from '@ant-design/icons-vue'
 import { useCategoryStore } from '@/stores/category'
+import { useBookStore } from '@/stores/book'
 
 const categoryStore = useCategoryStore()
+const bookStore = useBookStore()
+
+// 分类下的图书数量按 categoryId 实时核对，删除图书后立即回显
+function getBookCount(categoryId) {
+  return bookStore.countBooksByCategory(categoryId)
+}
 
 const searchKeyword = ref('')
 const modalVisible = ref(false)
@@ -233,8 +240,13 @@ async function handleSubmit() {
 
 function handleDelete(id) {
   const category = categoryStore.getCategoryById(id)
-  if (category && category.bookCount > 0) {
-    message.warning('该分类下还有图书，无法删除')
+  if (!category) {
+    message.error('分类不存在或已被删除')
+    return
+  }
+  const bookCount = bookStore.countBooksByCategory(id)
+  if (bookCount > 0) {
+    message.warning(`该分类下还有 ${bookCount} 本图书，无法删除`)
     return
   }
 

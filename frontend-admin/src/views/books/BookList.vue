@@ -116,11 +116,14 @@
           </template>
           <template v-else-if="column.key === 'action'">
             <a-space>
+              <a-button type="link" size="small" class="table-action-btn detail-btn" @click="showDetailModal(record)">
+                <EyeOutlined /> 详情
+              </a-button>
               <a-button type="link" size="small" class="table-action-btn edit-btn" @click="showEditModal(record)">
                 <EditOutlined /> 编辑
               </a-button>
               <a-popconfirm
-                title="确定要删除这本图书吗？"
+                title="确定要删除这本图书吗？未归还的图书将无法删除。"
                 ok-text="确定"
                 cancel-text="取消"
                 @confirm="handleDelete(record.id)"
@@ -200,12 +203,49 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- 图书详情弹窗：打开时按图书 id 实时核对，已删除的图书不再渲染详情 -->
+    <a-modal
+      v-model:open="detailVisible"
+      title="图书详情"
+      :footer="null"
+      width="560px"
+    >
+      <template v-if="currentBook">
+        <div class="detail-book">
+          <img :src="currentBook.cover" :alt="currentBook.title" class="detail-cover" />
+          <a-descriptions :column="1" bordered size="small" class="detail-desc">
+            <a-descriptions-item label="书名">{{ currentBook.title }}</a-descriptions-item>
+            <a-descriptions-item label="ISBN">{{ currentBook.isbn }}</a-descriptions-item>
+            <a-descriptions-item label="作者">{{ currentBook.author }}</a-descriptions-item>
+            <a-descriptions-item label="出版社">{{ currentBook.publisher }}</a-descriptions-item>
+            <a-descriptions-item label="出版日期">{{ currentBook.publishDate }}</a-descriptions-item>
+            <a-descriptions-item label="分类">{{ currentBook.categoryName || '-' }}</a-descriptions-item>
+            <a-descriptions-item label="价格">￥{{ currentBook.price }}</a-descriptions-item>
+            <a-descriptions-item label="库存">
+              可借 {{ currentBook.available }} / 共 {{ currentBook.total }} 本
+              <span v-if="currentBorrowedCount > 0" class="detail-borrowed">
+                （{{ currentBorrowedCount }} 本借出中）
+              </span>
+            </a-descriptions-item>
+            <a-descriptions-item label="存放位置">{{ currentBook.location }}</a-descriptions-item>
+            <a-descriptions-item label="简介">{{ currentBook.description || '暂无简介' }}</a-descriptions-item>
+          </a-descriptions>
+        </div>
+      </template>
+      <a-empty
+        v-else
+        :image="simpleImage"
+        description="该图书不存在或已被删除"
+        class="detail-empty"
+      />
+    </a-modal>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, nextTick, watch } from 'vue'
-import { message } from 'ant-design-vue'
+import { message, Empty } from 'ant-design-vue'
 import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined, EyeOutlined } from '@ant-design/icons-vue'
 import { useBookStore } from '@/stores/book'
 import { useCategoryStore } from '@/stores/category'
@@ -217,12 +257,15 @@ const loading = ref(false)
 const searchKeyword = ref('')
 const selectedCategory = ref(null)
 const modalVisible = ref(false)
+const detailVisible = ref(false)
 const submitLoading = ref(false)
 const isEdit = ref(false)
 const editingId = ref(null)
+const viewingId = ref(null)
 const formRef = ref(null)
 const isSearching = ref(false)
 const tableAnimating = ref(false)
+const simpleImage = Empty.PRESENTED_IMAGE_SIMPLE
 let searchTimeout = null
 
 const columns = [
@@ -233,7 +276,7 @@ const columns = [
   { title: '价格', dataIndex: 'price', key: 'price', width: 80 },
   { title: '库存', key: 'stock', width: 80 },
   { title: '位置', dataIndex: 'location', key: 'location', width: 100 },
-  { title: '操作', key: 'action', width: 150, fixed: 'right' }
+  { title: '操作', key: 'action', width: 200, fixed: 'right' }
 ]
 
 const formState = reactive({
@@ -271,6 +314,18 @@ const filteredBooks = computed(() => {
   }
 
   return result
+})
+
+// 详情弹窗：始终以 viewingId 为唯一标识实时核对，
+// 即使弹窗打开期间该图书被删除，也只显示“已删除”而不会报错
+const currentBook = computed(() => {
+  if (viewingId.value === null) return null
+  return bookStore.getBookById(viewingId.value) || null
+})
+
+const currentBorrowedCount = computed(() => {
+  if (!currentBook.value) return 0
+  return bookStore.getBorrowedCount(currentBook.value.id)
 })
 
 function handleSearch() {
@@ -352,22 +407,34 @@ function showAddModal() {
 }
 
 function showEditModal(record) {
+  // 以行记录的 id 重新核对目标图书，避免编辑到同名的另一本书
+  const book = bookStore.getBookById(record.id)
+  if (!book) {
+    message.error('该图书不存在或已被删除，无法编辑')
+    return
+  }
   isEdit.value = true
-  editingId.value = record.id
+  editingId.value = book.id
   Object.assign(formState, {
-    isbn: record.isbn,
-    title: record.title,
-    author: record.author,
-    publisher: record.publisher,
-    categoryId: record.categoryId,
-    price: record.price,
-    total: record.total,
-    location: record.location
+    isbn: book.isbn,
+    title: book.title,
+    author: book.author,
+    publisher: book.publisher,
+    categoryId: book.categoryId,
+    price: book.price,
+    total: book.total,
+    location: book.location
   })
   modalVisible.value = true
   nextTick(() => {
     formRef.value?.clearValidate()
   })
+}
+
+function showDetailModal(record) {
+  // 仅记录图书 id，弹窗内容通过 currentBook 按 id 实时核对
+  viewingId.value = record.id
+  detailVisible.value = true
 }
 
 // 导入本地封面图片
@@ -402,25 +469,39 @@ async function handleSubmit() {
     // 使用真实书籍封面图片
     const randomCover = DEFAULT_COVERS[Math.floor(Math.random() * DEFAULT_COVERS.length)]
 
-    const bookData = {
-      ...formState,
-      categoryName: category?.name || '',
-      available: isEdit.value ? undefined : formState.total,
-      cover: isEdit.value ? (bookStore.getBookById(editingId.value)?.cover || randomCover) : randomCover
-    }
-
-    // 编辑时不覆盖 available
-    if (isEdit.value) {
-      delete bookData.available
-    }
-
     await new Promise(resolve => setTimeout(resolve, 500))
 
     if (isEdit.value) {
-      bookStore.updateBook(editingId.value, bookData)
+      // 先按 id 校验库存，库存不合法时整体放弃，保留原记录
+      const stockResult = bookStore.updateBookTotal(editingId.value, formState.total)
+      if (!stockResult.success) {
+        message.error(stockResult.reason)
+        return
+      }
+      // 元数据更新同样按 id 核对，不携带 available / total，避免误改同名书
+      const { total, ...metadata } = formState
+      const updated = bookStore.updateBook(editingId.value, {
+        ...metadata,
+        categoryName: category?.name || '',
+        cover: bookStore.getBookById(editingId.value)?.cover || randomCover
+      })
+      if (!updated) {
+        message.error('该图书不存在或已被删除，更新失败，原记录已保留')
+        return
+      }
       message.success('图书更新成功')
     } else {
-      bookStore.addBook(bookData)
+      const newId = bookStore.addBook({
+        ...formState,
+        categoryName: category?.name || '',
+        available: formState.total,
+        cover: randomCover,
+        description: ''
+      })
+      if (!newId) {
+        message.error('图书添加失败')
+        return
+      }
       message.success('图书添加成功')
     }
 
@@ -433,8 +514,15 @@ async function handleSubmit() {
 }
 
 function handleDelete(id) {
-  bookStore.deleteBook(id)
-  message.success('图书删除成功')
+  // 删除结果由 store 按图书 id 核对：借出中的图书会被拒绝，
+  // 删除失败时原记录保留，并向用户说明原因
+  const result = bookStore.deleteBook(id)
+  if (result.success) {
+    detailVisible.value = false
+    message.success('图书删除成功')
+  } else {
+    message.error(result.reason)
+  }
 }
 </script>
 
@@ -729,6 +817,11 @@ function handleDelete(id) {
     border-radius: 4px;
     transition: all 0.2s ease;
 
+    &.detail-btn:hover {
+      color: #722ed1;
+      background: #f9f0ff;
+    }
+
     &.edit-btn:hover {
       color: #1890ff;
       background: #e6f7ff;
@@ -804,5 +897,34 @@ function handleDelete(id) {
 .low-stock {
   color: #ff4d4f;
   font-weight: 500;
+}
+
+// 图书详情弹窗
+.detail-book {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+
+  .detail-cover {
+    width: 120px;
+    height: 160px;
+    object-fit: cover;
+    border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    flex-shrink: 0;
+  }
+
+  .detail-desc {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .detail-borrowed {
+    color: #ff4d4f;
+  }
+}
+
+.detail-empty {
+  margin: 32px 0 16px;
 }
 </style>
